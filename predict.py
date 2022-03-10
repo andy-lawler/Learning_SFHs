@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import h5py
 
@@ -14,7 +15,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.models import Sequential
 
 from tensorflow.keras.layers import Dense, InputLayer, Dropout, Activation
-from tensorflow.keras.layers import Embedding, Conv1D, MaxPooling1D, LSTM, Flatten, GlobalMaxPooling1D, BatchNormalization
+from tensorflow.keras.layers import Embedding, Conv1D, MaxPooling1D, LSTM, Flatten, GlobalMaxPooling1D, BatchNormalization, SimpleRNN, GRU
 
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, TensorBoard, Callback
 
@@ -22,6 +23,10 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras import backend as K
 
 from tensorflow.keras.constraints import NonNeg
+
+from tensorflow.keras.layers import PReLU
+
+import time
 
 class predict(spectacle):
 
@@ -40,7 +45,7 @@ class predict(spectacle):
 
     def training_mask(self, frac=0.2):
         
-        shids = self.load_arr('ID','Subhalos')
+        shids = self.load_arr('Subhalos/ID')
 
         if shids is not None:
 
@@ -155,32 +160,32 @@ class predict(spectacle):
 
 
 
-#     def prepare_predictors(self, binning='log_6', CNN=False):
+#     def prepare_predictors(self, binning='log_6', RNN=False):
 #         """
 #         Prepare star formation histories for input in to model
 
 #         Args:
 #             binning (str) log or linear
-#             CNN (bool) whether to transform shape suitable for input to keras CNN
+#             RNN (bool) whether to transform shape suitable for input to keras RNN
 #         """
         
 #         predictors = np.array([value['SFH'][binning] for key, value in self.galaxies.items()])
 
-#         # if CNN:
+#         # if RNN:
 #         #     if len(predictors.shape) < 3:
 #         #         predictors = np.reshape(predictors, predictors.shape + (1,))
 
 #         return predictors
 
 
-    def prepare_features(self, spec=None, key='Intrinsic', scaler=None, CNN=False, verbose=False):
+    def prepare_features(self, spec=None, key='Intrinsic', scaler=None, RNN=False, verbose=False):
         """
         Prepare spectra for input to predictive model
 
         Args:
             spectra (str) spectra key
             scaler (object) scaler object to apply to features. If not specified, default from self.spectra[spectra]['scaler'] used
-            CNN (bool) whether to transform shape suitable for input to keras CNN
+            RNN (bool) whether to transform shape suitable for input to keras RNN
             verbose (bool) verbosity flag
         """
 
@@ -201,7 +206,7 @@ class predict(spectacle):
         
         features = scaler.transform(spec)
 
-        if CNN:
+        if RNN:
             if len(features.shape) < 3:
                 features.shape += (1,)
         
@@ -209,9 +214,9 @@ class predict(spectacle):
 
 
 
-    def create_cnn_model(self, features, predictors, batch_size=10, train=None, plot=False, max_epochs=1000, loss=None, verbose=False, fit=True):
+    def create_rnn_model(self, features, predictors, batch_size=10, train=None, plot=True, max_epochs=1000, loss=None, verbose=True, fit=True):
         """
-        Define, initialise and train CNN
+        Define, initialise and train RNN
 
         Args:
             features (array) 
@@ -228,10 +233,6 @@ class predict(spectacle):
         # updatable plot
         if plot:
             ## live plotting
-            import matplotlib
-            matplotlib.use('agg')
-            from matplotlib import pyplot as plt
-            from IPython.display import clear_output
             class PlotLosses(Callback):
                 def on_train_begin(self, logs={}):
                     self.i = 0
@@ -256,43 +257,33 @@ class predict(spectacle):
                     plt.plot(self.x, self.losses, label="loss")
                     plt.plot(self.x, self.val_losses, label="val_loss")
                     plt.legend()
-                    plt.show();
+                    plt.show()
                 
 
         input_dim = features.shape[1:]
         out_dim = predictors.shape[1]
+
+        model = Sequential()
     
         initializer = 'he_normal'
     
-        model = Sequential()
-    
-        model.add(Conv1D(filters=35, 
-                         kernel_size=25,
-                         padding='same',
-                         input_shape=input_dim))
+        #model.add(SimpleRNN(32, input_shape=input_dim, return_sequences=True))
+        #model.add(SimpleRNN(32, return_sequences=True))
+        #model.add(SimpleRNN(32, return_sequences=False))   
+        #model.add(LSTM(16, input_shape=input_dim, return_sequences=True))
+        #model.add(LSTM(16, return_sequences=False))
+        model.add(GRU(16, input_shape=input_dim, return_sequences=True))
+        model.add(GRU(16, return_sequences=False))
+        #model.add(Dense(32, kernel_initializer=initializer))
+        #model.add(Dense(32, kernel_initializer=initializer))
 
-        model.add(Activation(activation='relu'))
-        model.add(BatchNormalization())
-    
-        model.add(Conv1D(filters=55, 
-                         kernel_size=55,
-                         padding='same'))
-        
-        model.add(Activation(activation='relu'))
-        model.add(BatchNormalization())
-    
-        model.add(GlobalMaxPooling1D())
-        
-        model.add(Dense(55, kernel_initializer=initializer))
-        model.add(Dense(55, kernel_initializer=initializer))
-
-        model.add(Activation('relu'))
-    
+        #model.add(Activation('relu'))
         model.add(Dense(out_dim, 
                         kernel_initializer='normal', 
-                        kernel_constraint=nonneg()))
+                        kernel_constraint=NonNeg())
+                  )
     
-        lr = 0.0007
+        lr = 0.0007 #default 0.0007
         beta_1 = 0.9
         beta_2 = 0.999
     
@@ -333,13 +324,16 @@ class predict(spectacle):
         mask = np.random.permutation(np.sum(train))
 
         if fit:
+            start = time.time()
             history = model.fit(features[train][mask], predictors[train][mask],
                                 callbacks=callbacks, epochs=max_epochs, 
                                 batch_size=batch_size, validation_split=0.2, 
                                 verbose=verbose)
-    
+            stop = time.time()
             score, mae, mse, acc = model.evaluate(features[~train], predictors[~train], verbose=0)
-            print('Test SMAPE:', score)
+            print('Test SMAPE:', round(score, 4), 'MAE:', round(mae, 4), 'MSE:', round(mse, 4), 'ACC:', round(acc, 4))
+            print(f"Training time: {round((stop - start)/60, 1)}m")
+            os.system('spd-say "the fitting has finished"')
             return model, {'loss': score, 'mse': mse, 'mae': mae, 'acc': acc, 'history': history}
         else:
             return model
@@ -351,7 +345,7 @@ class predict(spectacle):
         Propogate spectral uncertainties through model
 
         Args:
-            model (keras model) CNN model
+            model (keras model) RNN model
             key (str) 
             scaler (Keras scaler object) should be the scaller for the noise-added spectra case
             N (int) number of resamples
@@ -367,7 +361,7 @@ class predict(spectacle):
 
         for i in np.arange(N):
             spec_noise = self.add_noise_flat(spec, wl, sn=sn)
-            spec_noise = self.prepare_features(spec_noise, scaler=scaler, CNN=True)
+            spec_noise = self.prepare_features(spec_noise, scaler=scaler, RNN=True)
 
             pred[i] = model.predict(spec_noise[~self.train])
 
@@ -514,4 +508,3 @@ class predict(spectacle):
         negative R^2 error
         """
         return -1 * (1 - K.sum((y_pred - y_true)**2, axis=-1) / K.sum((y_true - K.mean(y_true))**2, axis=-1))
-    
