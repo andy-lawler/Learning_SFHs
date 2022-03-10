@@ -28,6 +28,8 @@ from tensorflow.keras.layers import PReLU
 
 import time
 
+from matplotlib import pyplot as plt
+
 class predict(spectacle):
 
     def __init__(self, **kwargs):
