@@ -1,5 +1,5 @@
-import sys
-import os
+# import sys
+# import os
 import numpy as np
 import matplotlib
 # matplotlib.use('agg')
@@ -60,6 +60,16 @@ def _SMAPE_tf(y_true, y_pred):
     return 2 * tf.reduce_sum(tf.abs(y_pred - y_true), axis=-1) / \
             tf.reduce_sum(y_pred + y_true, axis=-1)
 
+def _SMAPE_tf_single(y_true, y_pred):
+    """
+    Symmetric Mean Absolute Percentage Error
+    https://en.wikipedia.org/wiki/Symmetric_mean_absolute_percentage_error
+    """
+    y_true += 0.01
+    y_pred += 0.01
+    return tf.multiply(2.,tf.divide( tf.abs(tf.subtract(y_pred, y_true)), tf.add(y_true, y_pred)))
+
+
 
 
 
@@ -67,13 +77,13 @@ def _SMAPE_tf(y_true, y_pred):
 tf.keras.backend.clear_session()
 
 inputs1 = tf.keras.layers.Input(shape=(features.shape[1],))
-fe1 = tf.keras.layers.Dense(16, activation='sigmoid')(inputs1)
-# fe2 = tf.keras.layers.Dense(16, activation='sigmoid')(inputs1)
-# fe1 = tf.keras.layers.Dense(, activation='sigmoid')(inputs1)
+fe1 = tf.keras.layers.Dense(32, activation='sigmoid')(inputs1)
+# fe2 = tf.keras.layers.Dense(32, activation='sigmoid')(fe1)
+# fe3 = tf.keras.layers.Dense(32, activation='sigmoid')(fe2)
 
 inputs2 = tf.keras.layers.Input(shape=(N_bins,1))
 se1 = tf.keras.layers.Masking(mask_value=-1, input_shape=(N_bins,1))(inputs2)
-se2 = tf.keras.layers.LSTM(16, input_shape=(N_bins,))(se1)
+se2 = tf.keras.layers.LSTM(32, input_shape=(N_bins,))(se1)
 
 decoder1 = tf.keras.layers.add([fe1, se2])
 decoder2 = tf.keras.layers.Dense(32, activation='relu')(decoder1)
@@ -81,19 +91,21 @@ outputs = tf.keras.layers.Dense(1, activation='relu')(decoder2)
 
 model = tf.keras.models.Model(inputs=[inputs1, inputs2], outputs=outputs)
 
-# model.compile(optimizer='adam', loss=_SMAPE_tf)
+optimizer = tf.keras.optimizers.Adam()#clipnorm=1, clipvalue=1)
+model.compile(optimizer=optimizer, loss=_SMAPE_tf_single)
 # model.compile(optimizer='adam', loss='MeanSquaredLogarithmicError')
-model.compile(optimizer='adam', loss='mse')
+# model.compile(optimizer='adam', loss='mse')
+# model.compile(optimizer='adam', loss='mean_absolute_percentage_error')
 
 early_stopping_min_delta = 1e-4
-early_stopping_patience = 6
+early_stopping_patience = 8
 
 early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss',
                            min_delta=early_stopping_min_delta,
                            patience=early_stopping_patience,
                            verbose=2, mode='min')
 
-reduce_lr_patience = 4
+reduce_lr_patience = 6
 reduce_lr_min = 0.0
 
 reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='loss',
