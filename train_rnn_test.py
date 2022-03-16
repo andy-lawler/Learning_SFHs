@@ -18,10 +18,34 @@ from predict import predict
 si = predict(fname='../public_html/full_histories_illustris.h5')
 si.training_mask()
 
-sn = 50
-predictors = si.load_arr('SFH/log_8')
-bins = si.load_arr('bins/log_8/bins')
+
+# ## finer binning
+# upperBin = np.log10(si.cosmo.age(si.redshift).value * 1e9)
+# binLimits = np.hstack([[0.0], np.linspace(7.5, upperBin, num=32)])
+# binWidths = 10**binLimits[1:] - 10**binLimits[:len(binLimits)-1]
+# bins = binLimits[:-1] + ((binLimits[1:] - binLimits[:-1]) / 2)
+# binLimits = 10**binLimits / 1e9
+# custom = {'binLimits': binLimits, 'bins': bins, 'binWidths': binWidths}
+# 
+# bins, binLimits, binWidths = si.init_bins(name='log_32', custom=custom, verbose=True)
+# 
+# import schwimmbad
+# from functools import partial
+# shids = si.load_arr('Subhalos/ID')
+# pool = schwimmbad.choose_pool()# processes=args.n_cores)
+# lg = partial(si.bin_histories, binLimits=binLimits, binWidths=binWidths)
+# sfh = np.array(list(pool.map(lg,shids)))
+# pool.close()
+# # sfh = si.bin_histories(shids, binLimits=binLimits, binWidths=binWidths)
+# si.save_arr(sfh,'log_32','SFH')
+
+_bin_no = 32
+predictors = si.load_arr('SFH/log_%i'%_bin_no)
+bins = si.load_arr('bins/log_%i/bins'%_bin_no)
+
+
 illustris_dust, wl = si.load_spectra('Dust')
+# sn = 50
 # illustris_noise = np.random.normal(loc=0, scale=illustris_dust / sn)
 # illustris_final_dust_noise = illustris_dust + illustris_noise
 # si.generate_standardisation(key='Dust Noise SN50', spec=illustris_final_dust_noise)
@@ -48,7 +72,7 @@ for i in np.where(train)[0]:
     train_reshape[i*N_bins:(i*N_bins)+N_bins] = True
 
 
-features_reshape = np.repeat(features,8,axis=0)
+features_reshape = np.repeat(features,N_bins,axis=0)
 
 
 
@@ -59,6 +83,7 @@ def _SMAPE_tf(y_true, y_pred):
     """
     return 2 * tf.reduce_sum(tf.abs(y_pred - y_true), axis=-1) / \
             tf.reduce_sum(y_pred + y_true, axis=-1)
+
 
 def _SMAPE_tf_single(y_true, y_pred):
     """
@@ -77,27 +102,27 @@ def _SMAPE_tf_single(y_true, y_pred):
 tf.keras.backend.clear_session()
 
 inputs1 = tf.keras.layers.Input(shape=(features.shape[1],))
-fe1 = tf.keras.layers.Dense(32, activation='sigmoid')(inputs1)
-# fe2 = tf.keras.layers.Dense(32, activation='sigmoid')(fe1)
+fe1 = tf.keras.layers.Dense(32, activation='relu', kernel_initializer='normal')(inputs1)
+fe2 = tf.keras.layers.Dense(32, activation='relu', kernel_initializer='normal')(fe1)
 # fe3 = tf.keras.layers.Dense(32, activation='sigmoid')(fe2)
 
 inputs2 = tf.keras.layers.Input(shape=(N_bins,1))
 se1 = tf.keras.layers.Masking(mask_value=-1, input_shape=(N_bins,1))(inputs2)
 se2 = tf.keras.layers.LSTM(32, input_shape=(N_bins,))(se1)
 
-decoder1 = tf.keras.layers.add([fe1, se2])
-decoder2 = tf.keras.layers.Dense(32, activation='relu')(decoder1)
-outputs = tf.keras.layers.Dense(1, activation='relu')(decoder2)
+decoder1 = tf.keras.layers.add([fe2, se2])
+decoder2 = tf.keras.layers.Dense(32, activation='relu', kernel_initializer='normal')(decoder1)
+outputs = tf.keras.layers.Dense(1, kernel_constraint=tf.keras.constraints.NonNeg(),
+                                kernel_initializer='normal' )(decoder2)
 
 model = tf.keras.models.Model(inputs=[inputs1, inputs2], outputs=outputs)
 
 optimizer = tf.keras.optimizers.Adam()#clipnorm=1, clipvalue=1)
-model.compile(optimizer=optimizer, loss=_SMAPE_tf_single)
-# model.compile(optimizer='adam', loss='MeanSquaredLogarithmicError')
-# model.compile(optimizer='adam', loss='mse')
+# model.compile(optimizer=optimizer, loss=_SMAPE_tf_single)
+model.compile(optimizer='adam', loss='mse')
 # model.compile(optimizer='adam', loss='mean_absolute_percentage_error')
 
-early_stopping_min_delta = 1e-4
+early_stopping_min_delta = 1e1
 early_stopping_patience = 8
 
 early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss',
@@ -115,11 +140,14 @@ reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='loss',
                           mode='min', verbose=2)
 
 model.fit([features_reshape[train_reshape],predictors_reshape[train_reshape]], 
-           predictors_y[train_reshape], epochs=50, verbose=1, callbacks=[early_stopping,reduce_lr], 
+           predictors_y[train_reshape], epochs=500, verbose=1, callbacks=[early_stopping,reduce_lr], 
            batch_size=1000)
 
-model.evaluate([features_reshape[~train_reshape], predictors_reshape[~train_reshape]], 
-    predictors_y[~train_reshape], verbose=0)
+# model.save('RNN_test.model')
+
+print("Evaluate:",model.evaluate([features_reshape[~train_reshape], 
+                                  predictors_reshape[~train_reshape]], 
+                                 predictors_y[~train_reshape], verbose=0))
 
 prediction = model.predict([features_reshape[~train_reshape], predictors_reshape[~train_reshape]])
 
@@ -129,18 +157,20 @@ prediction = model.predict([features_reshape[~train_reshape], predictors_reshape
 tf.keras.backend.clear_session()
 
 inputs1 = tf.keras.layers.Input(shape=(features.shape[1],))
-fe1 = tf.keras.layers.Dense(64, activation='sigmoid')(inputs1)
-fe2 = tf.keras.layers.Dense(32, activation='sigmoid')(fe1)
-fe3 = tf.keras.layers.Dense(32, activation='sigmoid')(fe2)
-outputs = tf.keras.layers.Dense(N_bins, activation='relu')(fe3)
+fe1 = tf.keras.layers.Dense(32, activation='relu', kernel_initializer='normal')(inputs1)
+fe2 = tf.keras.layers.Dense(32, activation='relu', kernel_initializer='normal')(fe1)
+# fe3 = tf.keras.layers.Dense(32, activation='sigmoid')(fe2)
+outputs = tf.keras.layers.Dense(N_bins, kernel_constraint=tf.keras.constraints.NonNeg(), 
+                                kernel_initializer='normal')(fe2)
 model = tf.keras.models.Model(inputs=inputs1, outputs=outputs)
 # model.compile(optimizer='adam', loss='mse')
 model.compile(optimizer='adam', loss=_SMAPE_tf)
-model.fit(features[train], predictors[train], epochs=200, verbose=1, 
+model.fit(features[train], predictors[train], epochs=500, verbose=1, 
           callbacks=[early_stopping,reduce_lr])
+print("Evaluate:",model.evaluate([features[~train], predictors[~train], verbose=0))
 prediction_comp = model.predict(features[~train])
 
-
+model.save('ANN_test.model')
 
 
 ## 1:1 scatter plot
@@ -166,7 +196,7 @@ plt.savefig('relative_error.png'); plt.close()
 fig,ax = plt.subplots(1,1)
 for i,b in enumerate(bins):
     ax.scatter((np.random.rand(np.sum(~train))/2)+i+0.5, 
-               (prediction[:,0].reshape((-1,8)) / predictors[~train])[:,i], s=1, c='C%i'%i)
+               (prediction[:,0].reshape((-1,N_bins)) / predictors[~train])[:,i], s=1, c='C%i'%i)
     ax.scatter((np.random.rand(np.sum(~train))/2)+i+1, 
                (prediction_comp / predictors[~train])[:,i], s=1, c='C%i'%i)
     ax.vlines(i+1, 10**-3, 10**3, linestyle='dashed',color='black')
@@ -182,7 +212,7 @@ plt.savefig('bin_relative_error.png'); plt.close()
 i = 100
 fig,ax = plt.subplots(1,1)
 ax.step(bins, predictors[i], label='True', where='mid')
-ax.step(bins, prediction.reshape((-1,8))[i][::-1], label='prediction RNN', where='mid')
+ax.step(bins, prediction.reshape((-1,N_bins))[i][::-1], label='prediction RNN', where='mid')
 ax.step(bins, prediction_comp[i][::-1], label='prediction ANN', where='mid')
 ax.legend()
 ax.set_xlim(7.5,9.85)
