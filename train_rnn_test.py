@@ -11,6 +11,9 @@ import tensorflow as tf
 # for _device in physical_devices:
 #     config = tf.config.experimental.set_memory_growth(_device, True)
 
+import schwimmbad
+from functools import partial
+
 from predict import predict
 
 # max_epochs = int(sys.argv[1])
@@ -39,7 +42,7 @@ si.training_mask()
 # # sfh = si.bin_histories(shids, binLimits=binLimits, binWidths=binWidths)
 # si.save_arr(sfh,'log_32','SFH')
 
-_bin_no = 32
+_bin_no = 8
 predictors = si.load_arr('SFH/log_%i'%_bin_no)
 bins = si.load_arr('bins/log_%i/bins'%_bin_no)
 
@@ -53,7 +56,10 @@ si.generate_standardisation(key='Dust', spec=illustris_dust)
 features = si.prepare_features(illustris_dust, key='Dust', RNN=True)
 
 
-train = np.random.rand(len(features)) > 0.2 
+# train = np.random.rand(len(features)) > 0.2 
+# np.savetxt('train.txt',train)
+train = np.array(np.loadtxt('train.txt'), dtype=bool)
+
 
 ## split out predictors into sequences
 N_bins = len(bins)
@@ -90,8 +96,8 @@ def _SMAPE_tf_single(y_true, y_pred):
     Symmetric Mean Absolute Percentage Error
     https://en.wikipedia.org/wiki/Symmetric_mean_absolute_percentage_error
     """
-    y_true += 0.01
-    y_pred += 0.01
+    # y_true += 0.01
+    # y_pred += 0.01
     return tf.multiply(2.,tf.divide( tf.abs(tf.subtract(y_pred, y_true)), tf.add(y_true, y_pred)))
 
 
@@ -118,11 +124,11 @@ outputs = tf.keras.layers.Dense(1, kernel_constraint=tf.keras.constraints.NonNeg
 model = tf.keras.models.Model(inputs=[inputs1, inputs2], outputs=outputs)
 
 optimizer = tf.keras.optimizers.Adam()#clipnorm=1, clipvalue=1)
-# model.compile(optimizer=optimizer, loss=_SMAPE_tf_single)
-model.compile(optimizer='adam', loss='mse')
+model.compile(optimizer=optimizer, loss=_SMAPE_tf_single)
+# model.compile(optimizer='adam', loss='mse')
 # model.compile(optimizer='adam', loss='mean_absolute_percentage_error')
 
-early_stopping_min_delta = 1e1
+early_stopping_min_delta = 1e-4
 early_stopping_patience = 8
 
 early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss',
@@ -143,14 +149,42 @@ model.fit([features_reshape[train_reshape],predictors_reshape[train_reshape]],
            predictors_y[train_reshape], epochs=500, verbose=1, callbacks=[early_stopping,reduce_lr], 
            batch_size=1000)
 
-# model.save('RNN_test.model')
+model.save('RNN_test_bin%i.model'%_bin_no)
+model = tf.keras.models.load_model('RNN_test_bin%i.model'%_bin_no, 
+             custom_objects={"_SMAPE_tf_single": _SMAPE_tf_single})
 
-print("Evaluate:",model.evaluate([features_reshape[~train_reshape], 
-                                  predictors_reshape[~train_reshape]], 
-                                 predictors_y[~train_reshape], verbose=0))
 
-prediction = model.predict([features_reshape[~train_reshape], predictors_reshape[~train_reshape]])
+# print("Evaluate:",model.evaluate([features_reshape[~train_reshape], 
+#                                   predictors_reshape[~train_reshape]], 
+#                                  predictors_y[~train_reshape], verbose=0))
 
+# prediction = model.predict([features_reshape[~train_reshape], predictors_reshape[~train_reshape]])
+
+def predict_history(_features, _bin_no):
+    predictors_temp = (np.ones(_bin_no) * -1).T
+    for i in np.arange(_bin_no):
+        _pred_obin = model.predict([np.expand_dims(_features,0),
+                                    np.expand_dims(predictors_temp,0)])
+
+        predictors_temp[i] = _pred_obin
+
+    return predictors_temp
+
+
+# pool = schwimmbad.choose_pool(processes=8)
+# lg = partial(predict_history, _bin_no=_bin_no)
+# prediction = np.array(list(pool.map(lg,features[~train])))
+# pool.close()
+
+prediction = np.array([predict_history(_f, _bin_no) for _f in features[~train]])
+np.savetxt('rnn_prediction_bin%i.txt'%_bin_no, prediction)
+prediction = np.loadtxt('rnn_prediction_bin%i.txt'%_bin_no)
+
+def evaluate_model(predictors, predicted):
+    return np.mean(_SMAPE_tf(predictors, predicted))
+
+
+print("Evaluate:", evaluate_model(predictors[~train], prediction[:,::-1]))
 
 
 ## comparison model
@@ -167,17 +201,48 @@ model = tf.keras.models.Model(inputs=inputs1, outputs=outputs)
 model.compile(optimizer='adam', loss=_SMAPE_tf)
 model.fit(features[train], predictors[train], epochs=500, verbose=1, 
           callbacks=[early_stopping,reduce_lr])
-print("Evaluate:",model.evaluate([features[~train], predictors[~train], verbose=0))
+
 prediction_comp = model.predict(features[~train])
 
-model.save('ANN_test.model')
+model.save('ANN_test_bin%i.model'%_bin_no)
+model = tf.keras.models.load_model('ANN_test_bin%i.model'%_bin_no,
+         custom_objects={"_SMAPE_tf": _SMAPE_tf})
+
+print("Evaluate:",model.evaluate(features[~train], predictors[~train], verbose=0))
+
+
+## example histories
+fig,axes = plt.subplots(2,4,figsize=(14,8))
+# for i,ax in zip([0,10,100,200,500,1000,800,5],axes.flatten()):
+for i,ax in zip([0,10,20,30,40,50,60,70],axes.flatten()):
+    print(evaluate_model(predictors[~train][i], prediction[i][::-1]))
+    ax.step(bins, predictors[~train][i], label='True', where='mid')
+    ax.step(bins, prediction[i][::-1], label='prediction RNN', where='mid')
+    ax.step(bins, prediction_comp[i], label='prediction ANN', where='mid')
+    ax.set_ylim(0,)
+    ax.set_xlim(7.5,9.8)
+ 
+for ax in axes.flatten()[4:]: 
+    ax.set_xlabel('$\mathrm{log_{10}}(t_{\mathrm{L}} \,/\, \mathrm{Gyr})$')
+for ax in axes.flatten()[[0,4]]: 
+    ax.set_ylabel('$\mathrm{SFR} \,/\, M_{\odot} \mathrm{yr^{-1}}$')
+
+
+axes.flatten()[0].legend()
+plt.show()
+# plt.savefig('example_histories.png'); plt.close()
+
 
 
 ## 1:1 scatter plot
 fig, ax = plt.subplots(1,1)
-ax.scatter(predictors_y[~train_reshape], prediction, s=1, label='RNN')
-ax.scatter(predictors_y[~train_reshape], prediction_comp.reshape(-1), s=1, label='ANN')
+ax.scatter(predictors_y[~train_reshape], prediction.flatten(), s=1, label='RNN')
+ax.scatter(predictors_y[~train_reshape], prediction_comp[:,::-1].reshape(-1), s=1, label='ANN')
 ax.legend()
+ax.plot([0,200],[0,200],linestyle='dashed', color='black')
+ax.set_xlim(0,160); ax.set_ylim(0,160)
+ax.set_xlabel('SFR (True)')
+ax.set_ylabel('SFR (Predicted)')
 # plt.show()
 plt.savefig('1_to_1.png'); plt.close()
 
@@ -186,7 +251,7 @@ fig,ax = plt.subplots(1,1)
 ax.scatter(predictors_y[~train_reshape], 
            prediction[:,0] / predictors_y[~train_reshape], alpha=0.5, label='RNN', s=1)
 ax.scatter(predictors_y[~train_reshape], 
-           prediction_comp.reshape(-1) / predictors_y[~train_reshape], alpha=0.5, label='ANN', s=1)
+        prediction_comp[:,::-1].reshape(-1) / predictors_y[~train_reshape], alpha=0.5, label='ANN', s=1)
 ax.legend()
 ax.set_yscale('log')
 # plt.show()
@@ -196,9 +261,9 @@ plt.savefig('relative_error.png'); plt.close()
 fig,ax = plt.subplots(1,1)
 for i,b in enumerate(bins):
     ax.scatter((np.random.rand(np.sum(~train))/2)+i+0.5, 
-               (prediction[:,0].reshape((-1,N_bins)) / predictors[~train])[:,i], s=1, c='C%i'%i)
-    ax.scatter((np.random.rand(np.sum(~train))/2)+i+1, 
-               (prediction_comp / predictors[~train])[:,i], s=1, c='C%i'%i)
+            (prediction[:,::-1] / predictors[~train])[:,i], s=1, c='C%i'%i)
+    # ax.scatter((np.random.rand(np.sum(~train))/2)+i+1, 
+    #            (prediction_comp / predictors[~train])[:,i], s=1, c='C%i'%i)
     ax.vlines(i+1, 10**-3, 10**3, linestyle='dashed',color='black')
     ax.vlines(i+0.5, 10**-3, 10**3, linestyle='solid',color='black')
 ax.set_xticklabels(np.hstack([0.,["%0.2f"%b for b in bins][::-1]]))
@@ -209,68 +274,14 @@ plt.savefig('bin_relative_error.png'); plt.close()
 
 
 ## example history
-i = 100
-fig,ax = plt.subplots(1,1)
-ax.step(bins, predictors[i], label='True', where='mid')
-ax.step(bins, prediction.reshape((-1,N_bins))[i][::-1], label='prediction RNN', where='mid')
-ax.step(bins, prediction_comp[i][::-1], label='prediction ANN', where='mid')
-ax.legend()
-ax.set_xlim(7.5,9.85)
+fig,axes = plt.subplots(2,4,figsize=(20,8))
+for i,ax in zip([0,10,100,200,500,1000,800,5],axes.flatten()):
+    ax.step(bins, predictors[~train][i], label='True', where='mid')
+    ax.step(bins, prediction.reshape((-1,N_bins))[i][::-1], label='prediction RNN', where='mid')
+    ax.step(bins, prediction_comp[i], label='prediction ANN', where='mid')
+    ax.legend()
+    ax.set_xlim(7.5,10.0)
 # plt.show()
 plt.savefig('example_history.png'); plt.close()
 
 
-
-
-# def create_rnn_model(self, features, predictors, batch_size=10, train=None, plot=True, 
-#                      max_epochs=1000, loss=None, verbose=True, fit=True, learning_rate=0.0007):
-# 
-#     if train is None:
-#         if self.train is None: raise ValueError('No training mask initialised')
-#         train = self.train
-# 
-#     if loss is None:
-#         loss = self._SMAPE_tf
-# 
-# 
-#     input_dim = features.shape[1:]
-#     out_dim = predictors.shape[1]
-# 
-#     model = Sequential()
-#     model.add(GRU(16, input_shape=input_dim, return_sequences=True))
-#     model.add(GRU(16, return_sequences=False))
-# 
-#     model.add(Dense(out_dim,
-#                     kernel_initializer='normal',
-#                     kernel_constraint=NonNeg())
-#               )
-# 
-#     lr = learning_rate #default 0.0007
-#     beta_1 = 0.9
-#     beta_2 = 0.999
-# 
-#     optimizer = Adam(lr=lr, beta_1=beta_1, beta_2=beta_2, decay=0.0)
-# 
-#     model.compile(loss=loss,
-#                   optimizer=optimizer,
-#                   metrics=['mae','mse','accuracy'])
-# 
-#     # validation split is unshuffled, so need to pre-shuffle before training
-#     mask = np.random.permutation(np.sum(train))
-# 
-#     history = model.fit(features[train][mask], predictors[train][mask],
-#                         epochs=max_epochs,
-#                         batch_size=batch_size, validation_split=0.2,
-#                         verbose=verbose)
-#     
-#     score, mae, mse, acc = model.evaluate(features[~train], predictors[~train], verbose=0)
-#     return model, {'loss': score, 'mse': mse, 'mae': mae, 'acc': acc, 'history': history}
-#     
-# 
-# # model,scores = si.create_rnn_model(features, predictors, batch_size=100, train=si.train, 
-# #                                    learning_rate = 0.07, max_epochs = max_epochs)
-# 
-# 
-# f = 'data/rnn_trained_illustris_dust.h5'
-# if os.path.isfile(f): os.remove(f)
-# model.save(f)
